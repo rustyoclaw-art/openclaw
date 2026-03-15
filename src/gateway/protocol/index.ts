@@ -242,6 +242,10 @@ import {
   WizardStartParamsSchema,
   type WizardStartResult,
   WizardStartResultSchema,
+  type TasksCancelParams,
+  TasksCancelParamsSchema,
+  type TasksDispatchParams,
+  TasksDispatchParamsSchema,
   type WizardStatusParams,
   WizardStatusParamsSchema,
   type WizardStatusResult,
@@ -420,6 +424,9 @@ export const validateUpdateRunParams = ajv.compile<UpdateRunParams>(UpdateRunPar
 export const validateWebLoginStartParams =
   ajv.compile<WebLoginStartParams>(WebLoginStartParamsSchema);
 export const validateWebLoginWaitParams = ajv.compile<WebLoginWaitParams>(WebLoginWaitParamsSchema);
+export const validateTasksDispatchParams =
+  ajv.compile<TasksDispatchParams>(TasksDispatchParamsSchema);
+export const validateTasksCancelParams = ajv.compile<TasksCancelParams>(TasksCancelParamsSchema);
 
 export function formatValidationErrors(errors: ErrorObject[] | null | undefined) {
   if (!errors?.length) {
