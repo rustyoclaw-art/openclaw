@@ -103,6 +103,7 @@ const BASE_METHODS = [
   "chat.history",
   "chat.abort",
   "chat.send",
+  "tasks.create",
   "tasks.dispatch",
   "tasks.cancel",
 ];

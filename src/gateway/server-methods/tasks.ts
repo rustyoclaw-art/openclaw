@@ -3,10 +3,12 @@ import {
   errorShape,
   formatValidationErrors,
   validateTasksCancelParams,
+  validateTasksCreateParams,
   validateTasksDispatchParams,
 } from "../protocol/index.js";
 import type {
   TasksCancelResult,
+  TasksCreateResult,
   TasksDispatchResult,
   TaskStatus,
 } from "../protocol/schema/tasks.js";
@@ -21,7 +23,8 @@ import type { GatewayRequestHandlers } from "./types.js";
 
 interface TaskEntry {
   task_id: string;
-  agent_id: string;
+  /** Optional: tasks.create may omit agent_id; tasks.dispatch always supplies it. */
+  agent_id?: string;
   context_md?: string;
   idempotency_key?: string;
   status: TaskStatus;
@@ -113,6 +116,74 @@ export const tasksHandlers: GatewayRequestHandlers = {
   },
 
   /**
+   * tasks.create
+   *
+   * Creates a task without requiring an agent_id (agent assignment may happen
+   * later via tasks.dispatch or out-of-band).  Idempotency rules mirror
+   * tasks.dispatch:
+   *   1. If task_id already maps to a live task → return it (`created: false`).
+   *   2. If idempotency_key maps to a live task → return that task (`created: false`).
+   *   3. Otherwise create a new entry with status `queued` and return it (`created: true`).
+   */
+  "tasks.create": ({ params, respond }) => {
+    if (!validateTasksCreateParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid tasks.create params: ${formatValidationErrors(validateTasksCreateParams.errors)}`,
+        ),
+      );
+      return;
+    }
+
+    const p = params as {
+      task_id: string;
+      agent_id?: string;
+      context_md?: string;
+      idempotency_key?: string;
+    };
+
+    // Idempotency check 1: task_id already live.
+    const existingById = taskById.get(p.task_id);
+    if (existingById && !TERMINAL_STATUSES.has(existingById.status)) {
+      respond(true, toCreateResult(existingById, false), undefined);
+      return;
+    }
+
+    // Idempotency check 2: idempotency_key maps to a live task.
+    if (p.idempotency_key) {
+      const existingId = taskIdByIdempotencyKey.get(p.idempotency_key);
+      if (existingId) {
+        const existing = taskById.get(existingId);
+        if (existing && !TERMINAL_STATUSES.has(existing.status)) {
+          respond(true, toCreateResult(existing, false), undefined);
+          return;
+        }
+        // Previous task with this key is terminal — allow re-use.
+        taskIdByIdempotencyKey.delete(p.idempotency_key);
+      }
+    }
+
+    const task: TaskEntry = {
+      task_id: p.task_id,
+      agent_id: p.agent_id,
+      context_md: p.context_md,
+      idempotency_key: p.idempotency_key,
+      status: "queued",
+      created_at_ms: Date.now(),
+    };
+
+    taskById.set(task.task_id, task);
+    if (task.idempotency_key) {
+      taskIdByIdempotencyKey.set(task.idempotency_key, task.task_id);
+    }
+
+    respond(true, toCreateResult(task, true), undefined);
+  },
+
+  /**
    * tasks.cancel
    *
    * Cancels a queued or running task by task_id.  Cancelling a task that is
@@ -166,6 +237,18 @@ export const tasksHandlers: GatewayRequestHandlers = {
 };
 
 function toDispatchResult(task: TaskEntry, created: boolean): TasksDispatchResult {
+  return {
+    task_id: task.task_id,
+    // tasks.dispatch always supplies agent_id; assert presence here.
+    agent_id: task.agent_id!,
+    status: task.status,
+    created,
+    created_at_ms: task.created_at_ms,
+    idempotency_key: task.idempotency_key,
+  };
+}
+
+function toCreateResult(task: TaskEntry, created: boolean): TasksCreateResult {
   return {
     task_id: task.task_id,
     agent_id: task.agent_id,

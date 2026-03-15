@@ -164,6 +164,163 @@ describe("tasks.dispatch", () => {
   });
 });
 
+describe("tasks.create", () => {
+  beforeEach(() => _resetTaskStoreForTest());
+
+  function makeCreateOpts(params: Record<string, unknown>) {
+    return {
+      params,
+      respond: (() => {}) as never,
+      client: null,
+      context: {} as never,
+      req: { type: "req" as const, id: "req-tasks-create", method: "tasks.create" },
+      isWebchatConnect: () => false,
+    };
+  }
+
+  it("creates a new task and returns created:true", async () => {
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({ task_id: "create-abc" }),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+
+    expect(calls).toHaveLength(1);
+    const [ok, result] = calls[0];
+    expect(ok).toBe(true);
+    expect(result).toMatchObject({
+      task_id: "create-abc",
+      status: "queued",
+      created: true,
+    });
+    expect(typeof (result as { created_at_ms: number }).created_at_ms).toBe("number");
+  });
+
+  it("does not require agent_id", async () => {
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({ task_id: "create-no-agent" }),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+    expect(calls[0][0]).toBe(true);
+    expect((calls[0][1] as { agent_id?: string }).agent_id).toBeUndefined();
+  });
+
+  it("stores optional agent_id and context_md when provided", async () => {
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({
+        task_id: "create-ctx",
+        agent_id: "agent-42",
+        context_md: "## Goal\nDo the thing.",
+      }),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+    expect(calls[0][0]).toBe(true);
+    expect(calls[0][1]).toMatchObject({
+      task_id: "create-ctx",
+      agent_id: "agent-42",
+      created: true,
+    });
+  });
+
+  it("returns validation error for missing task_id", async () => {
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({}),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+    expect(calls[0][0]).toBe(false);
+    expect(calls[0][2]?.code).toBe("INVALID_REQUEST");
+  });
+
+  it("returns validation error for unknown extra properties", async () => {
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({ task_id: "create-bogus", bogus: true }),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+    expect(calls[0][0]).toBe(false);
+    expect(calls[0][2]?.code).toBe("INVALID_REQUEST");
+  });
+
+  describe("idempotency by task_id", () => {
+    it("returns the existing task on duplicate task_id (created:false)", async () => {
+      const calls1: RespondCall[] = [];
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-idem" }),
+        respond: ((...args: unknown[]) => calls1.push(args as RespondCall)) as never,
+      });
+      expect((calls1[0][1] as { created: boolean }).created).toBe(true);
+
+      const calls2: RespondCall[] = [];
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-idem" }),
+        respond: ((...args: unknown[]) => calls2.push(args as RespondCall)) as never,
+      });
+      const second = calls2[0][1] as { task_id: string; created: boolean };
+      expect(second.created).toBe(false);
+      expect(second.task_id).toBe("create-idem");
+    });
+  });
+
+  describe("idempotency by idempotency_key", () => {
+    it("returns the existing task when idempotency_key matches a live task (created:false)", async () => {
+      const calls1: RespondCall[] = [];
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-k1", idempotency_key: "create-idem-1" }),
+        respond: ((...args: unknown[]) => calls1.push(args as RespondCall)) as never,
+      });
+      expect((calls1[0][1] as { created: boolean }).created).toBe(true);
+
+      // Different task_id, same idempotency_key → should return existing.
+      const calls2: RespondCall[] = [];
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-k2", idempotency_key: "create-idem-1" }),
+        respond: ((...args: unknown[]) => calls2.push(args as RespondCall)) as never,
+      });
+      const second = calls2[0][1] as { task_id: string; created: boolean };
+      expect(second.created).toBe(false);
+      expect(second.task_id).toBe("create-k1");
+    });
+
+    it("allows re-use of idempotency_key after task reaches terminal state", async () => {
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-reuse-1", idempotency_key: "create-idem-reuse" }),
+        respond: (() => {}) as never,
+      });
+      // Cancel the first task to move it to terminal.
+      await tasksHandlers["tasks.cancel"]({
+        ...makeCancelOpts({ task_id: "create-reuse-1" }),
+        respond: (() => {}) as never,
+      });
+
+      const calls2: RespondCall[] = [];
+      await tasksHandlers["tasks.create"]({
+        ...makeCreateOpts({ task_id: "create-reuse-2", idempotency_key: "create-idem-reuse" }),
+        respond: ((...args: unknown[]) => calls2.push(args as RespondCall)) as never,
+      });
+      const second = calls2[0][1] as { task_id: string; created: boolean };
+      expect(second.created).toBe(true);
+      expect(second.task_id).toBe("create-reuse-2");
+    });
+  });
+
+  it("task created via tasks.create can be cancelled", async () => {
+    await tasksHandlers["tasks.create"]({
+      ...makeCreateOpts({ task_id: "create-then-cancel" }),
+      respond: (() => {}) as never,
+    });
+    const calls: RespondCall[] = [];
+    await tasksHandlers["tasks.cancel"]({
+      ...makeCancelOpts({ task_id: "create-then-cancel" }),
+      respond: ((...args: unknown[]) => calls.push(args as RespondCall)) as never,
+    });
+    expect(calls[0][0]).toBe(true);
+    expect((calls[0][1] as { cancelled: boolean }).cancelled).toBe(true);
+  });
+});
+
 describe("tasks.cancel", () => {
   beforeEach(() => _resetTaskStoreForTest());
 
